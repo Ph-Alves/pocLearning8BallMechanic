@@ -62,7 +62,14 @@ struct ContentView: View {
     @State private var currentText = "Pode me sacudir :)"
     @State private var detectionMethod: ShakeDetectionMethod = .uiKitMotion
     @State private var coreMotionDetector = CoreMotionShakeDetector()
+    @State private var hapticEngine = HapticEngine()
+    @State private var shakeIdleTimer: Timer?
+    @State private var shakeWasStrongEnough = false
     @State private var ballScale: CGFloat = 1.0
+    
+    // Abaixo deste valor de variação do acelerômetro, consideramos que não há
+    // sacudida em andamento (ruído natural de segurar o celular na mão).
+    private let motionFeedbackThreshold: Double = 0.3
     
     private let activities = [
         "Estudar SwiftUI",
@@ -126,15 +133,41 @@ struct ContentView: View {
         }
         // Método 2: CoreMotion
         .onAppear {
-            coreMotionDetector.onShake = {
-                if detectionMethod == .coreMotion {
-                    sortearAtividade()
+            hapticEngine.prepareHaptics()
+
+            // O sorteio só acontece quando o haptic contínuo para por inatividade
+            // (pessoa parou de sacudir) e, durante o movimento, a intensidade
+            // chegou a cruzar o shakeThreshold — evita sortear com tremores leves.
+            hapticEngine.onShakeSessionEnded = {
+                guard detectionMethod == .coreMotion, shakeWasStrongEnough else { return }
+                shakeWasStrongEnough = false
+                sortearAtividade()
+            }
+            // Haptic contínuo: toca enquanto a variação do acelerômetro estiver
+            // acima do threshold, com intensidade proporcional à força do movimento.
+            coreMotionDetector.onMotionUpdate = { delta in
+                guard detectionMethod == .coreMotion else { return }
+                guard delta > motionFeedbackThreshold else { return }
+                hapticEngine.startShakeLoop()
+                let normalized = min(delta / coreMotionDetector.shakeThreshold, 1.0)
+                hapticEngine.updateShakeIntensity(normalized)
+                if delta > coreMotionDetector.shakeThreshold {
+                    shakeWasStrongEnough = true
                 }
             }
             coreMotionDetector.startMonitoring()
+            
+            // Como não há um evento de "parou de sacudir", verificamos periodicamente
+            // se faz tempo que não chega leitura acima do threshold e paramos o haptic.
+            shakeIdleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                hapticEngine.stopShakeLoopIfIdle()
+            }
         }
         .onDisappear {
             coreMotionDetector.stopMonitoring()
+            shakeIdleTimer?.invalidate()
+            shakeIdleTimer = nil
+            hapticEngine.stopShakeLoop()
         }
     }
     

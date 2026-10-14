@@ -59,6 +59,10 @@ final class CoreMotionShakeDetector {
     // várias leituras acima do threshold em sequência) conte como um só evento.
     var shakeCooldown: TimeInterval = 1.0
     var onShake: (() -> Void)?
+    // Chamado a cada leitura do acelerômetro (10x por segundo), com a magnitude
+    // bruta da variação. Usado para alimentar um haptic contínuo em tempo real,
+    // diferente do onShake, que só dispara uma vez por sacudida (com cooldown).
+    var onMotionUpdate: ((Double) -> Void)?
 
     func startMonitoring() {
         guard motionManager.isAccelerometerAvailable else { return }
@@ -71,6 +75,8 @@ final class CoreMotionShakeDetector {
                 + abs(acceleration.y - self.lastAcceleration.y)
                 + abs(acceleration.z - self.lastAcceleration.z)
             self.lastAcceleration = acceleration
+
+            self.onMotionUpdate?(delta)
 
             guard delta > self.shakeThreshold else { return }
 

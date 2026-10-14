@@ -279,3 +279,210 @@ E bem simples, e algo legal aqui tambem, e que temos um scale definido do circul
 Podemos mexer nessa animaçao de outras maneiras, mas dessa forma ja cumpre o processo do ZoomIn da task.
 Outro detalhe, mas sobre o CoreMotion, e que temos um cooldown de sacudida, que pega um segundo de intervalo, e simples de implementar e age tal qual o do UIKit.
 
+## Implementaçao de haptics
+Quando precisamos implementar haptics, ainda mais um que trabalha em cima dessa ideia de chacoalhar precisamos montar uma certa estrutura que vai andar em harmonia com o core motion.
+```
+//
+//  HapticEngine.swift
+//  Learning8Ball
+//
+//  Created by Paulo Henrique Costa Alves on 14/10/26.
+//
+
+import Foundation
+import CoreHaptics
+
+class HapticEngine {
+    private var engine: CHHapticEngine?
+    private var continuousPlayer: CHHapticAdvancedPatternPlayer?
+    private var lastMotionDate: Date?
+    // Chamado quando o loop contínuo é parado por inatividade (ou seja, a
+    // pessoa realmente parou de sacudir) — não dispara em um stop manual.
+    var onShakeSessionEnded: (() -> Void)?
+
+    init(engine: CHHapticEngine? = nil) {
+        self.engine = engine
+    }
+    
+    func prepareHaptics() {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
+        do {
+            engine = try CHHapticEngine()
+            try engine?.start()
+        } catch {
+            print("There was an error creating the engine: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Haptic contínuo para shake
+    //
+    // Mantém um CHHapticAdvancedPatternPlayer "aberto" enquanto o celular
+    // estiver sendo sacudido, modulando intensidade/sharpness em tempo real
+    // a cada leitura do acelerômetro via sendParameters.
+    
+    func startShakeLoop() {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
+        guard continuousPlayer == nil else { return }
+        
+        let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.8)
+        let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.3)
+        // Duração longa: o evento fica "aberto" até chamarmos stop() explicitamente.
+        let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 100)
+        
+        do {
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            continuousPlayer = try engine?.makeAdvancedPlayer(with: pattern)
+            try continuousPlayer?.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            print("Failed to start shake loop: \(error.localizedDescription)")
+        }
+    }
+    
+    func updateShakeIntensity(_ magnitude: Double) {
+        lastMotionDate = Date()
+        guard let continuousPlayer else { return }
+        
+        let value = Float(min(max(magnitude, 0), 1))
+        let intensityParam = CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: value, relativeTime: 0)
+        let sharpnessParam = CHHapticDynamicParameter(parameterID: .hapticSharpnessControl, value: value, relativeTime: 0)
+        
+        do {
+            try continuousPlayer.sendParameters([intensityParam, sharpnessParam], atTime: CHHapticTimeImmediate)
+        } catch {
+            print("Failed to update shake intensity: \(error.localizedDescription)")
+        }
+    }
+    
+    func stopShakeLoopIfIdle(timeout: TimeInterval = 0.25) {
+        guard continuousPlayer != nil else { return }
+        guard let lastMotionDate, Date().timeIntervalSince(lastMotionDate) > timeout else { return }
+        stopShakeLoop()
+        onShakeSessionEnded?()
+    }
+    
+    func stopShakeLoop() {
+        try? continuousPlayer?.stop(atTime: CHHapticTimeImmediate)
+        continuousPlayer = nil
+        lastMotionDate = nil
+    }
+}
+
+```
+Começando pela engine, temos um metodo que prepara ela (roda no onAppear) e montar a engine que precisamos que vincula ao servidor de haptics do dispositivo.
+Depois, temos um start, um update, um end when idle e um end normal, cada um com seu intuito
+O start roda um haptics de duraçao 100 por que ele precisa continuar executando e aberto enquanto ele nao e parado, ja que ele vai rodar quando o movimento for detectado.
+pra isso ele precisa de um evento e um pattern, um evento e um haptic individual e um pattern e um conjunto de eventos que vai ser executado.
+usamos o advancedPlayer e rodamos o start usando o CHHapticTimeImmediate para rodar na hora.
+O update pega um valor, pega o maior entre ele e 0, depois o menor entre ele e 1, pois nao podemos definir menor que 0 e nem maior que 1 para os parametros de sharpness e intensity do haptics.
+Agora temos 2 stops, um responsavel por executar o stop principal quando nao receber nenhum aviso de movimento, e outro que termina tudo tanto para o onDisappear finalizar o processo.
+Como pode ver, temos uma closure que e executada no stop, mas vamos entrar nas closures depois, precisamos entender as alteraçoes do ShakeDetection:
+```
+@Observable
+final class CoreMotionShakeDetector {
+    private let motionManager = CMMotionManager()
+    private var lastAcceleration: CMAcceleration = CMAcceleration(x: 0, y: 0, z: 0)
+    private var lastShakeDate: Date?
+
+    var shakeThreshold: Double = 2.5
+    // Tempo mínimo entre dois disparos, para que uma única sacudida (que gera
+    // várias leituras acima do threshold em sequência) conte como um só evento.
+    var shakeCooldown: TimeInterval = 1.0
+    var onShake: (() -> Void)?
+    // Chamado a cada leitura do acelerômetro (10x por segundo), com a magnitude
+    // bruta da variação. Usado para alimentar um haptic contínuo em tempo real,
+    // diferente do onShake, que só dispara uma vez por sacudida (com cooldown).
+    var onMotionUpdate: ((Double) -> Void)?
+
+    func startMonitoring() {
+        guard motionManager.isAccelerometerAvailable else { return }
+        motionManager.accelerometerUpdateInterval = 0.1
+        motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data else { return }
+
+            let acceleration = data.acceleration
+            let delta = abs(acceleration.x - self.lastAcceleration.x)
+                + abs(acceleration.y - self.lastAcceleration.y)
+                + abs(acceleration.z - self.lastAcceleration.z)
+            self.lastAcceleration = acceleration
+
+            self.onMotionUpdate?(delta)
+
+            guard delta > self.shakeThreshold else { return }
+
+            let now = Date()
+            if let lastShakeDate, now.timeIntervalSince(lastShakeDate) < self.shakeCooldown {
+                return
+            }
+            self.lastShakeDate = now
+            self.onShake?()
+        }
+    }
+
+    func stopMonitoring() {
+        motionManager.stopAccelerometerUpdates()
+    }
+}
+```
+A principal (e praticamente unica alteraçao, e que ele tem uma closure que executa metodos de haptics conforme for detectado um delta, e agora sim a gente pode ir pra view para ligar os pontos.
+nao vou mostrar toda a view, so as alteraçoes que tiveram por que elas que sao realmente impactantes, peço que consulte o arquivo se for necessario lembrar da estrutura do circulo e tudo mais.
+```
+/// Novas variaveis
+    @State private var hapticEngine = HapticEngine()
+    @State private var shakeIdleTimer: Timer?
+    @State private var shakeWasStrongEnough = false
+    @State private var ballScale: CGFloat = 1.0
+    
+    // Abaixo deste valor de variação do acelerômetro, consideramos que não há
+    // sacudida em andamento (ruído natural de segurar o celular na mão).
+    private let motionFeedbackThreshold: Double = 0.3
+    
+
+/// Novo onAppear e onDisappear
+.onAppear {
+            hapticEngine.prepareHaptics()
+
+            // O sorteio só acontece quando o haptic contínuo para por inatividade
+            // (pessoa parou de sacudir) e, durante o movimento, a intensidade
+            // chegou a cruzar o shakeThreshold — evita sortear com tremores leves.
+            hapticEngine.onShakeSessionEnded = {
+                guard detectionMethod == .coreMotion, shakeWasStrongEnough else { return }
+                shakeWasStrongEnough = false
+                sortearAtividade()
+            }
+            // Haptic contínuo: toca enquanto a variação do acelerômetro estiver
+            // acima do threshold, com intensidade proporcional à força do movimento.
+            coreMotionDetector.onMotionUpdate = { delta in
+                guard detectionMethod == .coreMotion else { return }
+                guard delta > motionFeedbackThreshold else { return }
+                hapticEngine.startShakeLoop()
+                let normalized = min(delta / coreMotionDetector.shakeThreshold, 1.0)
+                hapticEngine.updateShakeIntensity(normalized)
+                if delta > coreMotionDetector.shakeThreshold {
+                    shakeWasStrongEnough = true
+                }
+            }
+            coreMotionDetector.startMonitoring()
+            
+            // Como não há um evento de "parou de sacudir", verificamos periodicamente
+            // se faz tempo que não chega leitura acima do threshold e paramos o haptic.
+            shakeIdleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                hapticEngine.stopShakeLoopIfIdle()
+            }
+        }
+        .onDisappear {
+            coreMotionDetector.stopMonitoring()
+            shakeIdleTimer?.invalidate()
+            shakeIdleTimer = nil
+            hapticEngine.stopShakeLoop()
+        }
+    
+```
+
+De maneira simples, a tela aparece, prepara o Haptics (engine setada), prepara a closure que e executada quando um haptics termina (para de receber update) que basicamente verifica se o movimento foi forte o suficiente e ai sim pode rodar a atividade caso seja.
+Precisamos que essa seja uma closure, por que o ideal e ela rodar ao final de um haptics, para que a tarefa so seja sorteada quando terminar de sacudir.
+A segunda closure e o update do coreMotion, ele vai pegar o delta que eu ja expliquei previamente e ver se pelo menos teve algum movimento (o motionFeedbackThreshold e menor que o do core motion por que ele ja dispara haptics mesmo com pouco movimento) e depois começa o haptics, e vai atualizando conforme o shake for sendo detectado com o novo valor gerado em normalized.
+Outro ponto dessa closure, e que ela executa o updateShakeIntensity e isso atualiza o lastMotionDate, pois essa linha que usamos para definir se passamos o tempo do timer para cancelar o hapticEngine
+Normalized pega delta / pelo threshold por que se delta for igual, da 1, que e nosso valor maximo dos parametros de um haptic
+e caso o delta for maior que o threshold do coreMotion (pra detectar um shake de verdade) marcamos o shakeWasStrong como true.
+E agora vem outro valor legal, que e o idle timer, um time automatico da view, que roda de tempo em tempo e verifica se nao teve nenhum update do coreMotion, e caso nao, ele para o engine de haptics.
+O onDisappear so para o monitoramento, para o timer e para o loop de haptics.
