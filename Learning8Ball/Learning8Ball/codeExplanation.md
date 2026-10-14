@@ -481,7 +481,7 @@ nao vou mostrar toda a view, so as alteraçoes que tiveram por que elas que sao 
 De maneira simples, a tela aparece, prepara o Haptics (engine setada), prepara a closure que e executada quando um haptics termina (para de receber update) que basicamente verifica se o movimento foi forte o suficiente e ai sim pode rodar a atividade caso seja.
 Precisamos que essa seja uma closure, por que o ideal e ela rodar ao final de um haptics, para que a tarefa so seja sorteada quando terminar de sacudir.
 A segunda closure e o update do coreMotion, ele vai pegar o delta que eu ja expliquei previamente e ver se pelo menos teve algum movimento (o motionFeedbackThreshold e menor que o do core motion por que ele ja dispara haptics mesmo com pouco movimento) e depois começa o haptics, e vai atualizando conforme o shake for sendo detectado com o novo valor gerado em normalized.
-Outro ponto dessa closure, e que ela executa o updateShakeIntensity e isso atualiza o lastMotionDate, pois essa linha que usamos para definir se passamos o tempo do timer para cancelar o hapticEngine
+Outro ponto dessa closure, e que ela executa o updateShakeIntensity e isso atualiza o lastMotionDate, pois essa linha que usamos para definir se passamos o tempo do timer para cancelar o hapticEngine.
 Normalized pega delta / pelo threshold por que se delta for igual, da 1, que e nosso valor maximo dos parametros de um haptic
 e caso o delta for maior que o threshold do coreMotion (pra detectar um shake de verdade) marcamos o shakeWasStrong como true.
 E agora vem outro valor legal, que e o idle timer, um time automatico da view, que roda de tempo em tempo e verifica se nao teve nenhum update do coreMotion, e caso nao, ele para o engine de haptics.
